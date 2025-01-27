@@ -11,51 +11,42 @@ pip install nonebot2[quart]
 :::
 
 FrontMatter:
+    mdx:
+        format: md
     sidebar_position: 5
     description: nonebot.drivers.quart 模块
 """
 
 import asyncio
 from functools import wraps
+from typing import Any, Optional, Union, cast
 from typing_extensions import override
-from typing import (
-    Any,
-    Dict,
-    List,
-    Tuple,
-    Union,
-    TypeVar,
-    Callable,
-    Optional,
-    Coroutine,
-    cast,
-)
 
-from pydantic import BaseSettings
+from pydantic import BaseModel
 
-from nonebot.config import Env
-from nonebot.exception import WebSocketClosed
-from nonebot.internal.driver import FileTypes
+from nonebot.compat import model_dump, type_validate_python
 from nonebot.config import Config as NoneBotConfig
+from nonebot.config import Env
+from nonebot.drivers import ASGIMixin, HTTPServerSetup, WebSocketServerSetup
+from nonebot.drivers import Driver as BaseDriver
 from nonebot.drivers import Request as BaseRequest
 from nonebot.drivers import WebSocket as BaseWebSocket
-from nonebot.drivers import ReverseDriver, HTTPServerSetup, WebSocketServerSetup
+from nonebot.exception import WebSocketClosed
+from nonebot.internal.driver import FileTypes
 
 try:
-    import uvicorn
+    from quart import Quart, Request, Response
+    from quart import Websocket as QuartWebSocket
     from quart import request as _request
     from quart.ctx import WebsocketContext
-    from quart.globals import websocket_ctx
-    from quart import Quart, Request, Response
     from quart.datastructures import FileStorage
-    from quart import Websocket as QuartWebSocket
+    from quart.globals import websocket_ctx
+    import uvicorn
 except ModuleNotFoundError as e:  # pragma: no cover
     raise ImportError(
         "Please install Quart first to use this driver. "
         "Install with pip: `pip install nonebot2[quart]`"
     ) from e
-
-_AsyncCallable = TypeVar("_AsyncCallable", bound=Callable[..., Coroutine])
 
 
 def catch_closed(func):
@@ -69,37 +60,36 @@ def catch_closed(func):
     return decorator
 
 
-class Config(BaseSettings):
+class Config(BaseModel):
     """Quart 驱动框架设置"""
 
     quart_reload: bool = False
     """开启/关闭冷重载"""
-    quart_reload_dirs: Optional[List[str]] = None
+    quart_reload_dirs: Optional[list[str]] = None
     """重载监控文件夹列表，默认为 uvicorn 默认值"""
     quart_reload_delay: float = 0.25
     """重载延迟，默认为 uvicorn 默认值"""
-    quart_reload_includes: Optional[List[str]] = None
+    quart_reload_includes: Optional[list[str]] = None
     """要监听的文件列表，支持 glob pattern，默认为 uvicorn 默认值"""
-    quart_reload_excludes: Optional[List[str]] = None
+    quart_reload_excludes: Optional[list[str]] = None
     """不要监听的文件列表，支持 glob pattern，默认为 uvicorn 默认值"""
-    quart_extra: Dict[str, Any] = {}
+    quart_extra: dict[str, Any] = {}
     """传递给 `Quart` 的其他参数。"""
 
-    class Config:
-        extra = "ignore"
 
-
-class Driver(ReverseDriver):
+class Driver(BaseDriver, ASGIMixin):
     """Quart 驱动框架"""
 
     def __init__(self, env: Env, config: NoneBotConfig):
         super().__init__(env, config)
 
-        self.quart_config = Config(**config.dict())
+        self.quart_config = type_validate_python(Config, model_dump(config))
 
         self._server_app = Quart(
             self.__class__.__qualname__, **self.quart_config.quart_extra
         )
+        self._server_app.before_serving(self._lifespan.startup)
+        self._server_app.after_serving(self._lifespan.shutdown)
 
     @property
     @override
@@ -149,21 +139,11 @@ class Driver(ReverseDriver):
         )
 
     @override
-    def on_startup(self, func: _AsyncCallable) -> _AsyncCallable:
-        """参考文档: [`Startup and Shutdown`](https://pgjones.gitlab.io/quart/how_to_guides/startup_shutdown.html)"""
-        return self.server_app.before_serving(func)  # type: ignore
-
-    @override
-    def on_shutdown(self, func: _AsyncCallable) -> _AsyncCallable:
-        """参考文档: [`Startup and Shutdown`](https://pgjones.gitlab.io/quart/how_to_guides/startup_shutdown.html)"""
-        return self.server_app.after_serving(func)  # type: ignore
-
-    @override
     def run(
         self,
         host: Optional[str] = None,
         port: Optional[int] = None,
-        *,
+        *args,
         app: Optional[str] = None,
         **kwargs,
     ):
@@ -205,7 +185,7 @@ class Driver(ReverseDriver):
 
         data = await request.form
         files_dict = await request.files
-        files: List[Tuple[str, FileTypes]] = []
+        files: list[tuple[str, FileTypes]] = []
         key: str
         value: FileStorage
         for key, value in files_dict.items():

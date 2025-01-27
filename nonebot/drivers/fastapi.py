@@ -11,34 +11,35 @@ pip install nonebot2[fastapi]
 :::
 
 FrontMatter:
+    mdx:
+        format: md
     sidebar_position: 1
     description: nonebot.drivers.fastapi 模块
 """
 
-
-import logging
 import contextlib
 from functools import wraps
+import logging
+from typing import Any, Optional, Union
 from typing_extensions import override
-from typing import Any, Dict, List, Tuple, Union, Optional
 
-from pydantic import BaseSettings
+from pydantic import BaseModel
 
-from nonebot.config import Env
-from nonebot.exception import WebSocketClosed
-from nonebot.internal.driver import FileTypes
+from nonebot.compat import model_dump, type_validate_python
 from nonebot.config import Config as NoneBotConfig
+from nonebot.config import Env
+from nonebot.drivers import ASGIMixin, HTTPServerSetup, WebSocketServerSetup
+from nonebot.drivers import Driver as BaseDriver
 from nonebot.drivers import Request as BaseRequest
 from nonebot.drivers import WebSocket as BaseWebSocket
-from nonebot.drivers import ReverseDriver, HTTPServerSetup, WebSocketServerSetup
-
-from ._lifespan import LIFESPAN_FUNC, Lifespan
+from nonebot.exception import WebSocketClosed
+from nonebot.internal.driver import FileTypes
 
 try:
-    import uvicorn
-    from fastapi.responses import Response
     from fastapi import FastAPI, Request, UploadFile, status
-    from starlette.websockets import WebSocket, WebSocketState, WebSocketDisconnect
+    from fastapi.responses import Response
+    from starlette.websockets import WebSocket, WebSocketDisconnect, WebSocketState
+    import uvicorn
 except ModuleNotFoundError as e:  # pragma: no cover
     raise ImportError(
         "Please install FastAPI first to use this driver. "
@@ -59,7 +60,7 @@ def catch_closed(func):
     return decorator
 
 
-class Config(BaseSettings):
+class Config(BaseModel):
     """FastAPI 驱动框架设置，详情参考 FastAPI 文档"""
 
     fastapi_openapi_url: Optional[str] = None
@@ -72,30 +73,25 @@ class Config(BaseSettings):
     """是否包含适配器路由的 schema，默认为 `True`"""
     fastapi_reload: bool = False
     """开启/关闭冷重载"""
-    fastapi_reload_dirs: Optional[List[str]] = None
+    fastapi_reload_dirs: Optional[list[str]] = None
     """重载监控文件夹列表，默认为 uvicorn 默认值"""
     fastapi_reload_delay: float = 0.25
     """重载延迟，默认为 uvicorn 默认值"""
-    fastapi_reload_includes: Optional[List[str]] = None
+    fastapi_reload_includes: Optional[list[str]] = None
     """要监听的文件列表，支持 glob pattern，默认为 uvicorn 默认值"""
-    fastapi_reload_excludes: Optional[List[str]] = None
+    fastapi_reload_excludes: Optional[list[str]] = None
     """不要监听的文件列表，支持 glob pattern，默认为 uvicorn 默认值"""
-    fastapi_extra: Dict[str, Any] = {}
+    fastapi_extra: dict[str, Any] = {}
     """传递给 `FastAPI` 的其他参数。"""
 
-    class Config:
-        extra = "ignore"
 
-
-class Driver(ReverseDriver):
+class Driver(BaseDriver, ASGIMixin):
     """FastAPI 驱动框架。"""
 
     def __init__(self, env: Env, config: NoneBotConfig):
         super().__init__(env, config)
 
-        self.fastapi_config: Config = Config(**config.dict())
-
-        self._lifespan = Lifespan()
+        self.fastapi_config: Config = type_validate_python(Config, model_dump(config))
 
         self._server_app = FastAPI(
             lifespan=self._lifespan_manager,
@@ -153,14 +149,6 @@ class Driver(ReverseDriver):
             name=setup.name,
         )
 
-    @override
-    def on_startup(self, func: LIFESPAN_FUNC) -> LIFESPAN_FUNC:
-        return self._lifespan.on_startup(func)
-
-    @override
-    def on_shutdown(self, func: LIFESPAN_FUNC) -> LIFESPAN_FUNC:
-        return self._lifespan.on_shutdown(func)
-
     @contextlib.asynccontextmanager
     async def _lifespan_manager(self, app: FastAPI):
         await self._lifespan.startup()
@@ -174,12 +162,12 @@ class Driver(ReverseDriver):
         self,
         host: Optional[str] = None,
         port: Optional[int] = None,
-        *,
+        *args,
         app: Optional[str] = None,
         **kwargs,
     ):
         """使用 `uvicorn` 启动 FastAPI"""
-        super().run(host, port, app, **kwargs)
+        super().run(host, port, app=app, **kwargs)
         LOGGING_CONFIG = {
             "version": 1,
             "disable_existing_loggers": False,
@@ -219,7 +207,7 @@ class Driver(ReverseDriver):
             json = await request.json()
 
         data: Optional[dict] = None
-        files: Optional[List[Tuple[str, FileTypes]]] = None
+        files: Optional[list[tuple[str, FileTypes]]] = None
         with contextlib.suppress(Exception):
             form = await request.form()
             data = {}

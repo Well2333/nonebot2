@@ -11,22 +11,24 @@ pip install nonebot2[websockets]
 :::
 
 FrontMatter:
+    mdx:
+        format: md
     sidebar_position: 4
     description: nonebot.drivers.websockets 模块
 """
 
-import logging
-from functools import wraps
+from collections.abc import AsyncGenerator, Coroutine
 from contextlib import asynccontextmanager
+from functools import wraps
+import logging
+from typing import TYPE_CHECKING, Any, Callable, TypeVar, Union
 from typing_extensions import ParamSpec, override
-from typing import Type, Union, TypeVar, Callable, Awaitable, AsyncGenerator
 
-from nonebot.log import LoguruHandler
-from nonebot.drivers import Request, Response
-from nonebot.exception import WebSocketClosed
-from nonebot.drivers.none import Driver as NoneDriver
+from nonebot.drivers import Request, WebSocketClientMixin, combine_driver
 from nonebot.drivers import WebSocket as BaseWebSocket
-from nonebot.drivers import ForwardMixin, ForwardDriver, combine_driver
+from nonebot.drivers.none import Driver as NoneDriver
+from nonebot.exception import WebSocketClosed
+from nonebot.log import LoguruHandler
 
 try:
     from websockets.exceptions import ConnectionClosed
@@ -44,21 +46,20 @@ logger = logging.Logger("websockets.client", "INFO")
 logger.addHandler(LoguruHandler())
 
 
-def catch_closed(func: Callable[P, Awaitable[T]]) -> Callable[P, Awaitable[T]]:
+def catch_closed(
+    func: Callable[P, Coroutine[Any, Any, T]],
+) -> Callable[P, Coroutine[Any, Any, T]]:
     @wraps(func)
     async def decorator(*args: P.args, **kwargs: P.kwargs) -> T:
         try:
             return await func(*args, **kwargs)
         except ConnectionClosed as e:
-            if e.rcvd_then_sent:
-                raise WebSocketClosed(e.rcvd.code, e.rcvd.reason)  # type: ignore
-            else:
-                raise WebSocketClosed(e.sent.code, e.sent.reason)  # type: ignore
+            raise WebSocketClosed(e.code, e.reason)
 
     return decorator
 
 
-class Mixin(ForwardMixin):
+class Mixin(WebSocketClientMixin):
     """Websockets Mixin"""
 
     @property
@@ -67,12 +68,10 @@ class Mixin(ForwardMixin):
         return "websockets"
 
     @override
-    async def request(self, setup: Request) -> Response:
-        return await super().request(setup)
-
-    @override
     @asynccontextmanager
     async def websocket(self, setup: Request) -> AsyncGenerator["WebSocket", None]:
+        if setup.proxy is not None:
+            logger.warning("proxy is not supported by websockets driver")
         connection = Connect(
             str(setup.url),
             extra_headers={**setup.headers, **setup.cookies.as_header(setup)},
@@ -133,5 +132,10 @@ class WebSocket(BaseWebSocket):
         await self.websocket.send(data)
 
 
-Driver: Type[ForwardDriver] = combine_driver(NoneDriver, Mixin)  # type: ignore
-"""Websockets Driver"""
+if TYPE_CHECKING:
+
+    class Driver(Mixin, NoneDriver): ...
+
+else:
+    Driver = combine_driver(NoneDriver, Mixin)
+    """Websockets Driver"""
